@@ -62,6 +62,7 @@ def train_step(q_net, target_net, optimizer, buffer, batch_size, gamma, use_doub
     if use_noisy:
         q_net.reset_noise()
         target_net.reset_noise()
+        
     loss.backward()          # 그래디언트 계산 (q_net에만 생김)
 
     # DQN 계열 표준: grad norm 10으로 클리핑 (PER에서 큰 TD-error가 들어와도 안정)
@@ -76,26 +77,30 @@ def train(env, q_net, target_net, optimizer, buffer, n_actions, device,
           total_steps, learning_starts, train_freq, target_update_freq,
           batch_size, gamma_n, beta_start, use_double, use_noisy):
     """환경과 상호작용하며 버퍼를 채우고 주기적으로 q_net을 학습시키는 메인 루프."""
-    obs, _ = env.reset(seed=0)
+    frame, _ = env.reset(seed=0)
+    last_idx = buffer.start_episode(frame)   # 초기 프레임을 버퍼에 넣고 인덱스 반환
 
     for step in range(1, total_steps + 1):
         # NoisyNet을 쓰면 노이즈가 탐험을 담당하므로 epsilon=0
         epsilon = 0.0 if use_noisy else linear_epsilon(step, 1.0, 0.01, 250_000)
         if use_noisy:
             q_net.reset_noise()   # 매 행동 선택마다 noise 재샘플링 -> 탐험 다양성 확보
+        obs = buffer.get_obs(last_idx)         # 현재 스택 (4,84,84) 복원
         action = select_action(obs, q_net, epsilon, n_actions, device)
 
-        next_obs, reward, terminated, truncated, _ = env.step(action)
+        next_frame, reward, terminated, truncated, _ = env.step(action)
         done = terminated or truncated       # 두 종료 신호를 하나로 합침
 
         # 보상 클리핑: {-1, 0, +1}로 부호만 남김 (Atari DQN 표준, 학습 안정화)
         clipped_reward = float(np.sign(reward))
 
-        buffer.push(obs, action, clipped_reward, next_obs, done)
-        obs = next_obs
+        next_idx = buffer.add_frame(next_frame)
+        buffer.push(last_idx, action, clipped_reward, next_idx, done)
+        last_idx = next_idx   # 다음 스택을 위해 인덱스 갱신
 
         if done:
-            obs, _ = env.reset()   # 에피소드 끝났으면 환경 리셋
+            frame, _ = env.reset()                  # 에피소드 끝났으면 환경 리셋
+            last_idx = buffer.start_episode(frame)  # 새 에피소드 스택 초기화
 
         # 버퍼가 learning_starts 이상 쌓였고 train_freq 배수일 때만 학습
         if step >= learning_starts and step % train_freq == 0:

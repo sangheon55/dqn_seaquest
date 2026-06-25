@@ -5,10 +5,21 @@ import math
 
 
 class NoisyLinear(nn.Module):
-    """학습되는 노이즈를 가중치에 더해 탐험을 만드는 Linear 층 (NoisyNet, Factorized Gaussian).
+    """평범한 Linear + 학습 가능한 크기의 랜덤 perturbation (NoisyNet, Factorized Gaussian).
 
-    epsilon-greedy 대신 네트워크가 탐험량을 스스로 학습한다.
-    학습 모드에서는 노이즈를 섞고, 평가 모드에서는 평균 가중치(mu)만 사용한다.
+    출력을 분해하면:
+        y = (μ_W x + μ_b)            ← 그냥 평범한 linear layer
+          + (σ_W ⊙ ε_W) x + (σ_b ⊙ ε_b)  ← NoisyNet의 본질
+
+    뒤 항(σ ⊙ ε)의 의미:
+        σ : 학습되는 파라미터. "이 weight를 얼마나 흔들어도 되는가"를 gradient descent로 직접 조절
+        ε : 매 forward마다 새로 뽑는 random noise — 학습 안 됨, 그냥 랜덤 방향 소스
+        σ⊙ε : "학습된 불확실성 크기 × 랜덤 방향" = 매번 다른 perturbation
+
+    σ 가 0으로 수렴하면 perturbation 항이 사라져 평범한 linear로 퇴화한다.
+    즉 탐험이 필요 없는 차원은 네트워크 스스로 노이즈를 꺼버린다.
+    μ 는 본질이 아니라 "원래 있어야 했던 평범한 부분"이고,
+    σ 가 이 레이어를 epsilon-greedy와 다르게 만드는 진짜 메커니즘이다.
     """
     def __init__(self, in_features, out_features, std_init=0.5):
         super(NoisyLinear, self).__init__()
@@ -16,13 +27,14 @@ class NoisyLinear(nn.Module):
         self.out_features = out_features
         self.std_init = std_init
 
-        # 학습 파라미터: 평균(mu)과 노이즈 크기(sigma)를 가중치/편향 각각에 둠
+        # μ: 평범한 linear의 W, b와 동일한 역할
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
-        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
         self.bias_mu = nn.Parameter(torch.empty(out_features))
+        # σ: perturbation 크기를 학습 — 이것이 NoisyLinear의 정체성
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
         self.bias_sigma = nn.Parameter(torch.empty(out_features))
 
-        # 매 스텝 새로 뽑는 노이즈 (학습 대상이 아니므로 buffer로 등록)
+        # ε: 매 forward마다 reset_noise()로 교체되는 랜덤 방향 (학습 대상 아님)
         self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
         self.register_buffer('bias_epsilon', torch.empty(out_features))
 
@@ -30,7 +42,7 @@ class NoisyLinear(nn.Module):
         self.reset_noise()
 
     def reset_parameters(self):
-        """논문 기준 초기화: mu는 균등분포, sigma는 차원으로 스케일한 상수."""
+        """μ는 균등분포, σ는 논문 기준 상수로 초기화."""
         mu_range = 1 / math.sqrt(self.in_features)
         self.weight_mu.data.uniform_(-mu_range, mu_range)
         self.bias_mu.data.uniform_(-mu_range, mu_range)
@@ -39,27 +51,29 @@ class NoisyLinear(nn.Module):
         self.bias_sigma.data.fill_(self.std_init / math.sqrt(self.out_features))
 
     def _scale_noise(self, size):
-        """Factorized 노이즈용 스케일 함수 f(x) = sign(x) * sqrt(|x|)."""
+        """Factorized noise의 스케일 함수 f(x) = sign(x)·√|x|.
+        in/out 각각 1D noise를 뽑아 외적하면 행렬 크기 noise를 O(p+q)로 생성할 수 있다.
+        """
         x = torch.randn(size, device=self.weight_mu.device)
         return x.sign().mul(x.abs().sqrt())
 
     def reset_noise(self):
-        """새 노이즈를 뽑아 epsilon 버퍼를 갱신 (외적으로 가중치 모양 노이즈 생성)."""
-        epsilon_in = self._scale_noise(self.in_features)
+        """ε 버퍼를 새로 샘플링 — 매 forward 전에 호출해 perturbation 방향을 교체한다."""
+        epsilon_in  = self._scale_noise(self.in_features)
         epsilon_out = self._scale_noise(self.out_features)
-
+        # 외적: (out,) ⊗ (in,) → (out, in) 크기의 weight noise
         self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
         self.bias_epsilon.copy_(epsilon_out)
 
     def forward(self, x):
         if self.training:
-            # 학습: 가중치/편향에 노이즈를 섞어 탐험
+            # y = (μ_W x + μ_b) + (σ_W ⊙ ε_W) x + (σ_b ⊙ ε_b)
             weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
-            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+            bias   = self.bias_mu   + self.bias_sigma   * self.bias_epsilon
         else:
-            # 평가: 노이즈를 빼고 평균 가중치만 사용
+            # 평가 시: perturbation 항을 제거하고 μ만 사용 (deterministic)
             weight = self.weight_mu
-            bias = self.bias_mu
+            bias   = self.bias_mu
 
         return F.linear(x, weight, bias)
 

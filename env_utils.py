@@ -23,7 +23,8 @@ def make_env(env_id: str, seed: int, render_mode=None):
     )
 
     # 최근 4프레임을 쌓아 (4, 84, 84) 관측 생성 (움직임/방향 정보 확보)
-    env = gym.wrappers.FrameStackObservation(env, stack_size=4)
-
+    #env = gym.wrappers.FrameStackObservation(env, stack_size=1) 
+    # => frame_stack는 버퍼에서 직접 구현하므로 여기선 쓰지 않음
+    
     env.action_space.seed(seed)   # 행동 샘플링 재현성 확보
     return env

@@ -4,6 +4,8 @@ class SumTree:
     def __init__(self, capacity):
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1)  # sum tree 구조를 위한 배열
+        self.data = np.zeros(capacity, dtype=object)  # 실제 transition 데이터를 저장할 배열
+        self.idx = 0  # 다음에 덮어쓸 위치 (원형 버퍼)
     
     def _set_priority(self, idx, priority):
         """리프 우선순위를 바꾸고 그 변화량을 루트까지 부모 합에 전파한다."""
@@ -18,6 +20,7 @@ class SumTree:
     
     def _get_sample_indices_weights(self, batch_size: int, beta: float, size: int):
         """우선순위 비례 샘플링 + 중요도 가중치(IS weight)를 함께 반환한다."""
+        """
         segment_size = self.tree[0] / batch_size
         tree_indices = []
         weights = []
@@ -46,9 +49,25 @@ class SumTree:
             # IS weight = (N * P(i))^(-beta), 우선순위 샘플링이 만든 편향 보정
             weight = (size * prob) ** (-beta)
             weights.append(weight)
+        """
+        # segment을 한 번에 계산하고, 난수도 벡터화하여 for-loop 제거
+        segment = self.tree[0] / batch_size
+         # 난수 한 번에 벡터로 생성 (for-loop 제거)
+        v = (np.arange(batch_size) + np.random.random(batch_size)) * segment
+        # 트리 하강을 배열 인덱싱으로 batch 동시 처리
+        curr = np.zeros(batch_size, dtype=np.int32)
+        while True:
+            left  = 2 * curr + 1
+            right = 2 * curr + 2
+            if np.all(left >= len(self.tree)):  # 모두 리프 도달
+                break
+            at_leaf = left >= len(self.tree)
+            go_right = (~at_leaf) & (v > self.tree[left])
+            v[go_right] -= self.tree[left[go_right]]
+            curr = np.where(at_leaf, curr, np.where(go_right, right, left))
 
-        weights = np.array(weights, dtype=np.float32)
-        weights /= weights.max()   # 최댓값으로 정규화 -> 0~1 범위
-        data_indices = [ti - (self.capacity - 1) for ti in tree_indices]   # 리프 -> 데이터 인덱스
-
+        prob = self.tree[curr] / self.tree[0]   # 이 샘플이 뽑힐 확률
+        weight = (size * prob) ** (-beta)
+        weights = (weight / weight.max()).astype(np.float32)
+        data_indices = curr - (self.capacity - 1)
         return data_indices, weights

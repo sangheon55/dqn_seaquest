@@ -14,6 +14,8 @@ def main():
     USE_NOISY   = True    # Noisy Linear (켜면 epsilon-greedy 대신 노이즈로 탐험)
     # =====================================
 
+    STACK_SIZE = 4
+
     env = make_env("ALE/Seaquest-v5", seed=0)
     n_actions = env.action_space.n
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -21,10 +23,9 @@ def main():
     print(f"switches: double={USE_DOUBLE} dueling={USE_DUELING} nstep={USE_NSTEP}(n={N_STEP}) per={USE_PER} noisy={USE_NOISY}")
 
     # q_net은 학습용, target_net은 타깃 고정용 (주기적으로 q_net을 복사)
-    q_net = DQN_CNN(n_action=n_actions, dueling=USE_DUELING, noisy=USE_NOISY).to(device)
-    target_net = DQN_CNN(n_action=n_actions, dueling=USE_DUELING, noisy=USE_NOISY).to(device)
+    q_net = DQN_CNN(n_action=n_actions, in_channels=STACK_SIZE, dueling=USE_DUELING, noisy=USE_NOISY).to(device)
+    target_net = DQN_CNN(n_action=n_actions, in_channels=STACK_SIZE, dueling=USE_DUELING, noisy=USE_NOISY).to(device)
     target_net.load_state_dict(q_net.state_dict())
-    target_net.eval()
 
     optimizer = torch.optim.Adam(q_net.parameters(), lr=1e-4,eps=1.5e-4)
 
@@ -40,8 +41,8 @@ def main():
     # 버퍼 선택 (PER on/off) + n-step 길이 반영
     n_step = N_STEP if USE_NSTEP else 1
     gamma_n = gamma ** n_step     # n-step이면 target 할인율이 γ^n (1-step이면 그대로 γ)
-    buffer_kwargs = dict(capacity=100_000, obs_shape=env.observation_space.shape,
-                         device=device, n_step=n_step, gamma=gamma)
+    buffer_kwargs = dict(capacity=100_000, frame_shape=env.observation_space.shape,
+                         stack_size= STACK_SIZE, device=device, n_step=n_step, gamma=gamma)
     if USE_PER:
         buffer = PrioritizedReplayBuffer(**buffer_kwargs)
     else:
