@@ -40,7 +40,7 @@ class NoisyLinear(nn.Module):
 
     def _scale_noise(self, size):
         """Factorized 노이즈용 스케일 함수 f(x) = sign(x) * sqrt(|x|)."""
-        x = torch.randn(size)
+        x = torch.randn(size, device=self.weight_mu.device)
         return x.sign().mul(x.abs().sqrt())
 
     def reset_noise(self):

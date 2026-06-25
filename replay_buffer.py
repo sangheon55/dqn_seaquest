@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from collections import deque
-
+from sumtree import SumTree
 
 class ReplayBuffer:
     """균등 샘플링 경험 리플레이 버퍼. n-step return을 지원한다."""
@@ -105,17 +105,7 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.alpha = alpha          # 우선순위 반영 강도 (0이면 균등)
         self.eps = eps              # 우선순위 0 방지용 작은 값
         self.max_priority = 1.0     # 새 transition에 줄 초기 우선순위
-        self.tree = np.zeros(2 * capacity - 1)  # SumTree (내부 합 노드 + 리프)
-
-    def _set_priority(self, tree_idx, priority):
-        """리프 우선순위를 바꾸고 그 변화량을 루트까지 부모 합에 전파한다."""
-        diff = priority - self.tree[tree_idx]
-        curr = tree_idx
-        while True:
-            self.tree[curr] += diff
-            if curr == 0:
-                break
-            curr = (curr - 1) // 2   # 부모 노드로 거슬러 올라감
+        self.sum_tree = SumTree(capacity)   # 우선순위 합계 트리
 
     def _store_transition(self, obs, action, reward, next_obs, done):
         # 데이터 배열에 저장 (부모 클래스와 동일)
@@ -126,57 +116,21 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         self.dones[self.idx] = done
 
         # 새 transition은 최대 우선순위로 등록 (적어도 한 번은 뽑히도록)
-        tree_idx = self.idx + self.capacity - 1   # 데이터 인덱스 -> SumTree 리프 인덱스
-        self._set_priority(tree_idx, self.max_priority)
+        self.sum_tree._set_priority(self.idx, self.max_priority)
 
         # 인덱스/크기 갱신 (부모 클래스와 동일)
         self.idx = (self.idx + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
     def sample(self, batch_size: int, beta: float = 0.4):
-        """우선순위 비례 샘플링 + 중요도 가중치(IS weight)를 함께 반환한다."""
-        # 전체 합을 batch_size개 구간으로 나눠 구간마다 하나씩 뽑음 (stratified)
-        segment_size = self.tree[0]/batch_size
-        tree_indices = []
-        weights = []
-
-        for i in range(batch_size):
-            v = np.random.uniform(i*segment_size, (i+1)*segment_size)
-
-            # 루트에서 시작해 누적합을 따라 리프까지 내려감
-            curr=0
-            while 1:
-                left = 2 * curr + 1     # 왼쪽 자식
-                right = 2 * curr + 2    # 오른쪽 자식
-
-                if left >= len(self.tree):  # 리프 도달
-                    break
-
-                left_val = self.tree[left]
-                if v <= left_val:
-                    curr = left
-                else:
-                    v -= left_val
-                    curr = right
-
-            tree_indices.append(curr)
-            prob = self.tree[curr] / self.tree[0]   # 이 샘플이 뽑힐 확률
-
-            # IS weight = (N * P(i))^(-beta), 우선순위 샘플링이 만든 편향 보정
-            weight = (self.size * prob) ** (-beta)
-            weights.append(weight)
-
-        weights = np.array(weights, dtype=np.float32)
-        weights /= weights.max()   # 최댓값으로 정규화 -> 0~1 범위
+        data_indices, weights = self.sum_tree._get_sample_indices_weights(batch_size, beta, self.size)
         weights = torch.as_tensor(weights, device=self.device)
-        data_indices = [ti - (self.capacity - 1) for ti in tree_indices]   # 리프 -> 데이터 인덱스
-
         obs, actions, rewards, next_obs, dones = self._gather(data_indices)
-        return obs, actions, rewards, next_obs, dones, weights, tree_indices
+        return obs, actions, rewards, next_obs, dones, weights, data_indices
 
-    def update_priorities(self, tree_indices, td_errors):
+    def update_priorities(self, indices, td_errors):
         """p = (|td_error| + eps)^alpha 로 우선순위를 갱신하고 max_priority도 추적한다."""
-        for tree_idx, td_error in zip(tree_indices,td_errors):
+        for idx, td_error in zip(indices,td_errors):
             p = (abs(float(td_error)) + self.eps) ** self.alpha
             self.max_priority = max(self.max_priority, p)
-            self._set_priority(tree_idx, p)
+            self.sum_tree._set_priority(idx, p)

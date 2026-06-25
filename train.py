@@ -11,9 +11,12 @@ def linear_epsilon(step: int, eps_start: float, eps_end: float, decay_steps: int
     return (1 - frac) * eps_start + frac * eps_end
 
 def select_action(obs, q_net, epsilon, n_actions, device):
-    """epsilon 확률로 무작위 행동, 아니면 Q값이 가장 큰 행동을 고른다 (epsilon-greedy)."""
+    """epsilon-greedy 행동 선택.
+    NoisyNet 사용 시 epsilon=0.0 으로 호출되며, 탐험은 네트워크의 stochastic weight가 담당한다.
+    이 함수를 호출하기 전에 q_net.reset_noise()로 noise를 재샘플링해야 한다.
+    """
     if random.random() < epsilon:
-        return random.randrange(0,n_actions)   # 0 ~ n_actions-1 중 무작위 정수
+        return random.randrange(0, n_actions)   # 0 ~ n_actions-1 중 무작위 정수
     else:
         with torch.no_grad():   # 행동 선택엔 backward가 없으므로 그래디언트 계산 끔 (메모리/속도 절약)
             # obs(numpy, (4,84,84))를 tensor로 바꾸고 배치 차원 추가 -> (1,4,84,84)
@@ -78,6 +81,8 @@ def train(env, q_net, target_net, optimizer, buffer, n_actions, device,
     for step in range(1, total_steps + 1):
         # NoisyNet을 쓰면 노이즈가 탐험을 담당하므로 epsilon=0
         epsilon = 0.0 if use_noisy else linear_epsilon(step, 1.0, 0.01, 250_000)
+        if use_noisy:
+            q_net.reset_noise()   # 매 행동 선택마다 noise 재샘플링 -> 탐험 다양성 확보
         action = select_action(obs, q_net, epsilon, n_actions, device)
 
         next_obs, reward, terminated, truncated, _ = env.step(action)
